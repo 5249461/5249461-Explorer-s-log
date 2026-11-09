@@ -26,7 +26,10 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -48,6 +51,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.focusModifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
@@ -59,6 +63,7 @@ import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
+import androidx.core.content.getSystemService
 import com.example.explorerslog.ui.theme.ExplorersLogTheme
 import java.time.LocalTime
 import java.time.format.DateTimeFormatter
@@ -87,15 +92,71 @@ class MainActivity : ComponentActivity() {
 
 // ---- Stage 1: the Find data class and currentTime() -------------------
 
+data class Find(
+    val note: String,
+    val time: String,
+    val battery: Int? = null
+)
+
+fun currentTime():String {
+    return LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss"))
+}
 
 // ---- Stage 2: buzz() ---------------------------------------------------
 
+fun buzz(context: Context) {
+    val vibrator = context.getSystemService(Vibrator::class.java)
+    if (vibrator == null) {
+        return
+    }
+    vibrator.vibrate(
+        VibrationEffect.createOneShot(300, VibrationEffect.DEFAULT_AMPLITUDE)
+    )
+}
 
 // ---- Stage 3: batteryLevel() -------------------------------------------
 
+fun batteryLevel(context: Context): Int {
+    val manager = context.getSystemService(BatteryManager::class.java)
+    if (manager == null) {
+        return -1
+    }
+    val property = BatteryManager.BATTERY_PROPERTY_CAPACITY
+    return manager.getIntProperty(property)
+}
 
 // ---- Stage 4: hasNotificationPermission() and sendNotification() -------
 
+const val CHANNEL_ID = "finds"
+
+fun hasNotificationPermissions(context: Context): Boolean {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+        return true
+    }
+    val permission = Manifest.permission.POST_NOTIFICATIONS
+    val result = ContextCompat.checkSelfPermission(context, permission)
+    return result == PackageManager.PERMISSION_GRANTED
+}
+
+@SuppressLint("MissingPermission")
+fun sendNotification(context: Context, text: String) {
+    if (!hasNotificationPermissions(context)) {
+        return
+    }
+
+    val importance = NotificationManager.IMPORTANCE_DEFAULT
+    val channel = NotificationChannel(CHANNEL_ID, "Finds", importance)
+    val manager = NotificationManagerCompat.from(context)
+    manager.createNotificationChannel(channel)
+
+    val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+        .setSmallIcon(android.R.drawable.ic_dialog_info)
+        .setContentTitle("Find Logged")
+        .setContentText(text)
+        .build()
+    val id = System.currentTimeMillis().toInt()
+    manager.notify(id, notification)
+}
 
 // ---- Stage 5: hasLocationPermission(), describeLocation(), getLocation()
 
@@ -108,15 +169,92 @@ class MainActivity : ComponentActivity() {
 // After that, each stage adds to it.
 @Composable
 fun ExplorersLogApp(modifier: Modifier = Modifier) {
-    Column(modifier = modifier.fillMaxSize().padding(24.dp)) {
+    val context = LocalContext.current
+    val finds = remember {mutableStateListOf<Find>()}
+    var note by remember {mutableStateOf("")}
+    var status by remember{mutableStateOf("Ready to explore")}
+    var battery by remember{mutableStateOf(batteryLevel(context))}
+
+    val notificationLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    )
+    {
+        granted ->
+            when (granted) {
+                true -> status = "Notifications are on"
+                false -> status = "Notifications are off. The app still works"
+            }
+    }
+    fun logFind() {
+        if (note.isBlank()) {
+            status = "Type what you found first"
+            return
+        }
+        battery = batteryLevel(context)
+        finds.add(0, Find(note, currentTime(), battery))
+
+        buzz(context)
+        sendNotification(context, note)
+        status = "Logged: $note (bzzz!)"
+        note = ""
+    }
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(24.dp)
+    ) {
         Text("Explorer's Log", fontSize = 32.sp)
+        Text(status)
+        Text("Battery: $battery%")
+        if (battery in 0..19){Text("Battery Low! Head back to base.", color = Color.Red)}
         Spacer(modifier = Modifier.height(16.dp))
-        Text("Your log goes here")
+
+        OutlinedTextField(
+            value = note,
+            onValueChange = {note = it},
+            label = {Text("What did you find?")},
+            modifier = Modifier.fillMaxWidth()
+        )
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Button(onClick = {logFind()}) {
+                Text("Log it")
+            }
+            if (!hasNotificationPermissions(context)) {
+                OutlinedButton(onClick = {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    } else {
+                        status = "This phone doesn't need to ask"
+                    }
+                }) { Text("Turn on notifications") }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+        for (find in finds) {
+            FindCard(find)
+        }
     }
 }
 
 // ---- Stage 1: FindCard goes here ---------------------------------------
 
+@Composable
+fun FindCard(find: Find) {
+    Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Text(find.note, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            Row(modifier = Modifier.height(28.dp).fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween ) {
+                Text("Time: ${find.time}")
+                if (find.battery != null) {
+                    Text("\uD83D\uDD0B: ${find.battery}%")
+                }
+            }
+        }
+    }
+}
 
 // ---- Preview -----------------------------------------------------------
 @Preview(showBackground = true)

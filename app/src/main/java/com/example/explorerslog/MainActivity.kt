@@ -95,7 +95,8 @@ class MainActivity : ComponentActivity() {
 data class Find(
     val note: String,
     val time: String,
-    val battery: Int? = null
+    val battery: Int? = null,
+    val location: String? = null
 )
 
 fun currentTime():String {
@@ -160,7 +161,57 @@ fun sendNotification(context: Context, text: String) {
 
 // ---- Stage 5: hasLocationPermission(), describeLocation(), getLocation()
 
+fun hasLocationPermission(context: Context): Boolean {
+    val fine = ContextCompat.checkSelfPermission(
+        context,
+        Manifest.permission.ACCESS_FINE_LOCATION
 
+    )
+    val coarse = ContextCompat.checkSelfPermission(
+        context, Manifest.permission.ACCESS_COARSE_LOCATION
+    )
+    val granted = PackageManager.PERMISSION_GRANTED
+    return fine == granted || coarse == granted
+}
+
+fun describeLocation(location: Location?): String {
+    if (location == null) {
+        return "Not found. Is location turned on?"
+    }
+    val lat = location.latitude
+    val lon = location.longitude
+    return String.format(Locale.UK, "%.4f, %.4f", lat, lon)
+}
+
+@SuppressLint("MissingPermission")
+fun getLocation(context: Context, onResult: (String) -> Unit) {
+    if (!hasLocationPermission(context)){
+        onResult("No permission.")
+        return
+    }
+
+    val manager = context.getSystemService(LocationManager::class.java)
+    if (manager == null) {
+        onResult("This device has no location service")
+        return
+    }
+    val gps = LocationManager.GPS_PROVIDER
+    try {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val executor = context.mainExecutor
+            manager.getCurrentLocation(gps, null, executor) {
+                location ->onResult(describeLocation(location))
+            }
+        } else {
+            val location = manager.getLastKnownLocation(gps)
+            onResult(describeLocation(location))
+        }
+    } catch (e: SecurityException) {
+        onResult("Not allowed: ${e.message}")
+    } catch (e: IllegalArgumentException) {
+        onResult("This device has no GPS")
+    }
+}
 // ---- Stretch: openAppSettings() ----------------------------------------
 
 
@@ -174,6 +225,7 @@ fun ExplorersLogApp(modifier: Modifier = Modifier) {
     var note by remember {mutableStateOf("")}
     var status by remember{mutableStateOf("Ready to explore")}
     var battery by remember{mutableStateOf(batteryLevel(context))}
+    var location by remember { mutableStateOf<String?>(null)}
 
     val notificationLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -185,13 +237,34 @@ fun ExplorersLogApp(modifier: Modifier = Modifier) {
                 false -> status = "Notifications are off. The app still works"
             }
     }
+
+    val locationLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions())
+    {   results ->
+        val fine = Manifest.permission.ACCESS_FINE_LOCATION
+        val coarse = Manifest.permission.ACCESS_COARSE_LOCATION
+        val precise = results[fine] == true
+        val approximate = results[coarse] == true
+        if (precise || approximate) {
+            if (precise) {
+                status = "Precise location allowed"
+            } else {
+                status = "Approximate location allowed"
+            }
+
+            getLocation(context) { result ->
+                location = result
+            }
+        } else {
+            status = "Location refused. Finds are logged without it"
+        }
+    }
     fun logFind() {
         if (note.isBlank()) {
             status = "Type what you found first"
             return
         }
         battery = batteryLevel(context)
-        finds.add(0, Find(note, currentTime(), battery))
+        finds.add(0, Find(note, currentTime(), battery, location))
 
         buzz(context)
         sendNotification(context, note)
@@ -207,8 +280,15 @@ fun ExplorersLogApp(modifier: Modifier = Modifier) {
     ) {
         Text("Explorer's Log", fontSize = 32.sp)
         Text(status)
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+
+
         Text("Battery: $battery%")
-        if (battery in 0..19){Text("Battery Low! Head back to base.", color = Color.Red)}
+        if (battery in 0..19){Text("Battery Low!", color = Color.Red)}
+        }
+        if (location != null) {
+            Text("You are at: $location")
+        }
         Spacer(modifier = Modifier.height(16.dp))
 
         OutlinedTextField(
@@ -229,6 +309,20 @@ fun ExplorersLogApp(modifier: Modifier = Modifier) {
                         status = "This phone doesn't need to ask"
                     }
                 }) { Text("Turn on notifications") }
+            }
+            OutlinedButton(onClick = {
+                if (hasLocationPermission(context)) {
+                    getLocation((context)) { result -> location = result}
+                } else {
+                    locationLauncher.launch(
+                        arrayOf(
+                            Manifest.permission.ACCESS_FINE_LOCATION,
+                            Manifest.permission.ACCESS_COARSE_LOCATION
+                        )
+                    )
+                }
+            }) {
+                Text("Where am i?")
             }
         }
 
@@ -251,6 +345,9 @@ fun FindCard(find: Find) {
                 if (find.battery != null) {
                     Text("\uD83D\uDD0B: ${find.battery}%")
                 }
+            }
+            if (find.location != null){
+                Text("Location: ${find.location}")
             }
         }
     }
